@@ -324,41 +324,11 @@ static
 std::string
 discover_tz_dir()
 {
-    struct stat sb;
-    using namespace std;
-#  ifndef __APPLE__
-    CONSTDATA auto tz_dir_default = "/usr/share/zoneinfo";
-    CONSTDATA auto tz_dir_buildroot = "/usr/share/zoneinfo/uclibc";
-
-    // Check special path which is valid for buildroot with uclibc builds
-    if(stat(tz_dir_buildroot, &sb) == 0 && S_ISDIR(sb.st_mode))
-        return tz_dir_buildroot;
-    else if(stat(tz_dir_default, &sb) == 0 && S_ISDIR(sb.st_mode))
-        return tz_dir_default;
-    else
-        throw runtime_error("discover_tz_dir failed to find zoneinfo\n");
-#  else  // __APPLE__
-#      if TARGET_OS_IPHONE
-    return "/var/db/timezone/zoneinfo";
-#      else
-    CONSTDATA auto timezone = "/etc/localtime";
-    if (!(lstat(timezone, &sb) == 0 && S_ISLNK(sb.st_mode) && sb.st_size > 0))
-        throw runtime_error("discover_tz_dir failed\n");
-    string result;
-    char rp[PATH_MAX+1] = {};
-    if (readlink(timezone, rp, sizeof(rp)-1) > 0)
-        result = string(rp);
-    else
-        throw system_error(errno, system_category(), "readlink() failed");
-    auto i = result.find("zoneinfo");
-    if (i == string::npos)
-        throw runtime_error("discover_tz_dir failed to find zoneinfo\n");
-    i = result.find('/', i);
-    if (i == string::npos)
-        throw runtime_error("discover_tz_dir failed to find '/'\n");
-    return result.substr(0, i);
-#      endif
-#  endif  // __APPLE__
+#  ifndef __XTENSA__
+    return "storage/usr/share/zoneinfo";
+#  else
+    return "/storage/usr/share/zoneinfo";
+#  endif  // __XTENSA__
 }
 
 static
@@ -2673,28 +2643,6 @@ init_tzdb()
     }
     db->zones.shrink_to_fit();
     std::sort(db->zones.begin(), db->zones.end());
-#  if !MISSING_LEAP_SECONDS
-    std::ifstream in(get_tz_dir() + std::string(1, folder_delimiter) + "right/UTC",
-                     std::ios_base::binary);
-    if (in)
-    {
-        in.exceptions(std::ios::failbit | std::ios::badbit);
-        db->leaps = load_just_leaps(in);
-    }
-    else
-    {
-        in.clear();
-        in.open(get_tz_dir() + std::string(1, folder_delimiter) +
-                "UTC", std::ios_base::binary);
-        if (!in)
-            throw std::runtime_error("Unable to extract leap second information");
-        in.exceptions(std::ios::failbit | std::ios::badbit);
-        db->leaps = load_just_leaps(in);
-    }
-#  endif  // !MISSING_LEAP_SECONDS
-#  ifdef __APPLE__
-    db->version = get_version();
-#  endif
     return db;
 }
 
@@ -3650,128 +3598,7 @@ tzdb::current_zone() const
 
 const time_zone*
 tzdb::current_zone() const
-{
-    // On some OS's a file called /etc/localtime may
-    // exist and it may be either a real file
-    // containing time zone details or a symlink to such a file.
-    // On MacOS and BSD Unix if this file is a symlink it
-    // might resolve to a path like this:
-    // "/usr/share/zoneinfo/America/Los_Angeles"
-    // If it does, we try to determine the current
-    // timezone from the remainder of the path by removing the prefix
-    // and hoping the rest resolves to a valid timezone.
-    // It may not always work though. If it doesn't then an
-    // exception will be thrown by local_timezone.
-    // The path may also take a relative form:
-    // "../usr/share/zoneinfo/America/Los_Angeles".
-    {
-        struct stat sb;
-        CONSTDATA auto timezone = "/etc/localtime";
-        if (lstat(timezone, &sb) == 0 && S_ISLNK(sb.st_mode) && sb.st_size > 0) {
-            using namespace std;
-            string result;
-            char rp[PATH_MAX+1] = {};
-            if (readlink(timezone, rp, sizeof(rp)-1) > 0)
-                result = string(rp);
-            else
-                throw system_error(errno, system_category(), "readlink() failed");
-
-            const size_t pos = result.find(get_tz_dir());
-            if (pos != result.npos)
-                result.erase(0, get_tz_dir().size() + 1 + pos);
-            return locate_zone(result);
-        }
-    }
-    // On embedded systems e.g. buildroot with uclibc the timezone is linked
-    // into /etc/TZ which is a symlink to path like this:
-    // "/usr/share/zoneinfo/uclibc/America/Los_Angeles"
-    // If it does, we try to determine the current
-    // timezone from the remainder of the path by removing the prefix
-    // and hoping the rest resolves to valid timezone.
-    // It may not always work though. If it doesn't then an
-    // exception will be thrown by local_timezone.
-    // The path may also take a relative form:
-    // "../usr/share/zoneinfo/uclibc/America/Los_Angeles".
-    {
-        struct stat sb;
-        CONSTDATA auto timezone = "/etc/TZ";
-        if (lstat(timezone, &sb) == 0 && S_ISLNK(sb.st_mode) && sb.st_size > 0) {
-            using namespace std;
-            string result;
-            char rp[PATH_MAX+1] = {};
-            if (readlink(timezone, rp, sizeof(rp)-1) > 0)
-                result = string(rp);
-            else
-                throw system_error(errno, system_category(), "readlink() failed");
-
-            const size_t pos = result.find(get_tz_dir());
-            if (pos != result.npos)
-                result.erase(0, get_tz_dir().size() + 1 + pos);
-            return locate_zone(result);
-        }
-    }
-    {
-    // On some versions of some linux distro's (e.g. Ubuntu),
-    // the current timezone might be in the first line of
-    // the /etc/timezone file.
-        std::ifstream timezone_file("/etc/timezone");
-        if (timezone_file.is_open())
-        {
-            std::string result;
-            std::getline(timezone_file, result);
-            if (!result.empty())
-                return locate_zone(result);
-        }
-        // Fall through to try other means.
-    }
-    {
-    // On some versions of some bsd distro's (e.g. FreeBSD),
-    // the current timezone might be in the first line of
-    // the /var/db/zoneinfo file.
-        std::ifstream timezone_file("/var/db/zoneinfo");
-        if (timezone_file.is_open())
-        {
-            std::string result;
-            std::getline(timezone_file, result);
-            if (!result.empty())
-                return locate_zone(result);
-        }
-        // Fall through to try other means.
-    }
-    {
-    // On some versions of some bsd distro's (e.g. iOS),
-    // it is not possible to use file based approach,
-    // we switch to system API, calling functions in
-    // CoreFoundation framework.
-#if TARGET_OS_IPHONE
-        std::string result = date::iOSUtils::get_current_timezone();
-        if (!result.empty())
-            return locate_zone(result);
-#endif
-    // Fall through to try other means.
-    }
-    {
-    // On some versions of some linux distro's (e.g. Red Hat),
-    // the current timezone might be in the first line of
-    // the /etc/sysconfig/clock file as:
-    // ZONE="US/Eastern"
-        std::ifstream timezone_file("/etc/sysconfig/clock");
-        std::string result;
-        while (timezone_file)
-        {
-            std::getline(timezone_file, result);
-            auto p = result.find("ZONE=\"");
-            if (p != std::string::npos)
-            {
-                result.erase(p, p+6);
-                result.erase(result.rfind('"'));
-                return locate_zone(result);
-            }
-        }
-        // Fall through to try other means.
-    }
-    throw std::runtime_error("Could not get current timezone");
-}
+{return locate_zone("Europe/Berlin");}
 
 #endif  // !_WIN32
 
